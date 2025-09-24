@@ -1,0 +1,7 @@
+{
+  "scripts": {
+    "setup": "./conductor-setup.sh",
+    "run": "source venv/bin/activate && make dev",
+    "archive": ""
+  }
+}
