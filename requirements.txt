@@ -1,0 +1,67 @@
+# Core Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# Database
+sqlalchemy==2.0.23
+alembic==1.12.1
+asyncpg==0.29.0  # For PostgreSQL async support
+psycopg2-binary==2.9.9  # For PostgreSQL
+
+# Redis
+redis==5.0.1
+hiredis==2.2.3  # C parser for improved performance
+
+# Async HTTP
+httpx==0.25.1
+aiohttp==3.9.1
+websockets==12.0
+
+# Authentication & Security
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.6
+cryptography==41.0.7
+
+# DEX SDKs (optional - install as needed)
+# hyperliquid-python-sdk>=0.19.0
+# x10-python-trading-starknet>=0.1.0  # Extended SDK
+# lighter-python (install from git: pip install git+https://github.com/elliottech/lighter-python.git)
+
+# Ethereum utilities (for Vest signing)
+eth-account==0.10.0
+web3==6.11.3
+
+# Environment & Configuration
+python-dotenv==1.0.0
+
+# CLI Framework
+typer==0.9.0
+rich==13.7.0
+click==8.1.7
+prompt-toolkit==3.0.41
+keyring==24.3.0
+
+# Logging & Monitoring
+structlog==23.2.0
+python-json-logger==2.0.7
+
+# Utils
+pendulum==3.0.0  # Better datetime handling
+pyyaml==6.0.1
+
+# Development & Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+pytest-httpx==0.35.0
+faker==20.1.0
+
+# Code Quality
+black==23.11.0
+isort==5.12.0
+mypy==1.7.1
+flake8==6.1.0
+pre-commit==3.5.0
