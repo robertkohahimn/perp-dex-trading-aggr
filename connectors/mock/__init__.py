@@ -1,0 +1,3 @@
+"""
+Mock connector for testing.
+"""
