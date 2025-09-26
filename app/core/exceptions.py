@@ -390,7 +390,9 @@ class RateLimitError(DEXException):
 class ConnectorError(DEXException):
     """Connector error"""
     def __init__(self, dex: str = "", detail: str = "Connector error", **kwargs):
-        super().__init__(dex=dex, detail=detail, error_code="CONNECTOR_ERROR", **kwargs)
+        # Don't pass error_code in kwargs since DEXException sets it
+        kwargs.pop('error_code', None)
+        super().__init__(dex=dex, detail=detail, **kwargs)
 
 
 class AuthenticationError(AuthenticationException):

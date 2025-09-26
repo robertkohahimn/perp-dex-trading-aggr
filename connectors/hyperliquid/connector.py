@@ -1,17 +1,17 @@
 """
-Hyperliquid DEX connector implementation.
+Hyperliquid DEX connector implementation using official SDK.
 """
 import asyncio
-import json
-import time
 from typing import Dict, List, Optional, Any, AsyncIterator
 from decimal import Decimal
 from datetime import datetime, timezone
-import httpx
-import websockets
-from eth_account import Account as EthAccount
-from eth_account.messages import encode_typed_data
 import logging
+
+from hyperliquid.info import Info
+from hyperliquid.exchange import Exchange
+from hyperliquid.utils import constants
+from hyperliquid.utils.signing import OrderType as HLOrderType
+from eth_account import Account as EthAccount
 
 from connectors.base import (
     BaseConnector,
@@ -41,384 +41,295 @@ logger = logging.getLogger(__name__)
 
 class HyperliquidConnector(BaseConnector):
     """
-    Connector for Hyperliquid DEX.
-    
-    Hyperliquid uses EVM-style signing for authentication.
+    Connector for Hyperliquid DEX using the official SDK.
     """
     
-    BASE_URL = "https://api.hyperliquid.xyz"
-    TESTNET_URL = "https://api.hyperliquid-testnet.xyz"
-    WS_URL = "wss://api.hyperliquid.xyz/ws"
-    WS_TESTNET_URL = "wss://api.hyperliquid-testnet.xyz/ws"
-    
-    def __init__(self, use_testnet: bool = False, config: Optional[Any] = None):
-        """Initialize Hyperliquid connector."""
-        # Handle both dict and ConnectorConfig
+    def __init__(self, use_testnet: bool = False, config: Optional[ConnectorConfig] = None):
+        """
+        Initialize Hyperliquid connector.
+        
+        Args:
+            use_testnet: Whether to use testnet
+            config: Optional connector configuration
+        """
+        # Create default config if not provided
         if config is None:
-            from dataclasses import dataclass, field
-            @dataclass
-            class SimpleConfig:
-                name: str = "hyperliquid"
-                api_key: Optional[str] = None
-                api_secret: Optional[str] = None
-                testnet: bool = False
-                rate_limit: Optional[int] = None
-                metadata: Optional[Dict[str, Any]] = None
-            config = SimpleConfig(name="hyperliquid", testnet=use_testnet)
-        elif isinstance(config, dict):
-            from dataclasses import dataclass
-            @dataclass
-            class SimpleConfig:
-                name: str = "hyperliquid"
-                api_key: Optional[str] = None
-                api_secret: Optional[str] = None
-                testnet: bool = False
-                rate_limit: Optional[int] = None
-                metadata: Optional[Dict[str, Any]] = None
-            config = SimpleConfig(**config)
-            
+            config = ConnectorConfig(
+                name="hyperliquid",
+                api_key="",
+                api_secret="",
+                testnet=use_testnet
+            )
         super().__init__(config)
-        self.use_testnet = use_testnet or config.testnet
-        self.base_url = self.TESTNET_URL if self.use_testnet else self.BASE_URL
-        self.ws_url = self.WS_TESTNET_URL if self.use_testnet else self.WS_URL
-        self.session = None
-        self.ws_connection = None
-        self.account = None
+        self.use_testnet = use_testnet
+        self.base_url = constants.TESTNET_API_URL if use_testnet else constants.MAINNET_API_URL
+        self.wallet = None
+        self.exchange = None
+        self.info = None
         self.address = None
         self.vault_address = None
         
     async def connect(self) -> bool:
-        """Establish connection to the DEX."""
-        if not self.session:
-            self.session = httpx.AsyncClient(timeout=30.0)
+        """Connect to Hyperliquid."""
+        try:
+            # Initialize info client (public data, no auth needed)
+            self.info = Info(base_url=self.base_url, skip_ws=True)
+            logger.info(f"Connected to Hyperliquid {'testnet' if self.use_testnet else 'mainnet'}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to connect to Hyperliquid: {e}")
+            return False
+    
+    async def disconnect(self) -> bool:
+        """Disconnect from Hyperliquid."""
+        self.wallet = None
+        self.exchange = None
+        self.info = None
+        self.address = None
         return True
     
-    async def disconnect(self) -> None:
-        """Disconnect from the DEX."""
-        if self.session:
-            await self.session.aclose()
-            self.session = None
-        if self.ws_connection:
-            await self.ws_connection.close()
-            self.ws_connection = None
-            
     async def authenticate(self, credentials: Dict[str, Any]) -> bool:
         """
         Authenticate with Hyperliquid using private key.
         
         Args:
-            credentials: Dictionary containing 'private_key' and optional 'vault_address'
-            
-        Returns:
-            True if authentication successful
+            credentials: Dict containing 'private_key' and optionally 'vault_address'
         """
         try:
             private_key = credentials.get('private_key')
             if not private_key:
-                raise AuthenticationError("Private key required for Hyperliquid")
+                raise AuthenticationError("Private key required")
             
-            # Ensure private key has 0x prefix
+            # Add 0x prefix if not present
             if not private_key.startswith('0x'):
                 private_key = '0x' + private_key
             
-            # Create eth account from private key
-            self.account = EthAccount.from_key(private_key)
-            self.address = self.account.address
+            # Create wallet from private key
+            self.wallet = EthAccount.from_key(private_key)
+            self.address = self.wallet.address
             self.vault_address = credentials.get('vault_address')
             
-            # Ensure we have a session
-            await self.connect()
+            # Initialize exchange client with wallet
+            self.exchange = Exchange(
+                wallet=self.wallet,
+                base_url=self.base_url,
+                vault_address=self.vault_address
+            )
             
-            logger.info(f"Authenticated with Hyperliquid for address {self.address}")
+            # Test authentication by getting user state
+            user_state = self.info.user_state(self.address)
+            if user_state is None:
+                # New user, no state yet is ok
+                logger.info(f"New user authenticated: {self.address}")
+            else:
+                logger.info(f"Authenticated as {self.address}")
+            
             return True
             
-        except ValueError as e:
-            raise AuthenticationError(f"Invalid private key: {str(e)}")
         except Exception as e:
-            logger.error(f"Hyperliquid authentication failed: {e}")
-            raise AuthenticationError(f"Failed to authenticate: {str(e)}")
-    
-    def _sign_request(self, action: Dict, timestamp: int) -> str:
-        """
-        Sign request data for Hyperliquid API.
-        
-        Args:
-            action: The action data to sign
-            timestamp: Request timestamp
-            
-        Returns:
-            Signature string
-        """
-        if not self.account:
-            raise AuthenticationError("Not authenticated")
-        
-        # Create typed data structure for EIP-712 signing
-        typed_data = {
-            "types": {
-                "EIP712Domain": [
-                    {"name": "name", "type": "string"},
-                    {"name": "version", "type": "string"},
-                    {"name": "chainId", "type": "uint256"},
-                ],
-                "HyperliquidTransaction": [
-                    {"name": "action", "type": "string"},
-                    {"name": "nonce", "type": "uint64"},
-                ]
-            },
-            "primaryType": "HyperliquidTransaction",
-            "domain": {
-                "name": "HyperliquidSignTransaction",
-                "version": "1",
-                "chainId": 1337 if self.use_testnet else 42161,  # Arbitrum chainId
-            },
-            "message": {
-                "action": json.dumps(action, separators=(',', ':')),
-                "nonce": timestamp,
-            }
-        }
-        
-        # Sign the typed data
-        encoded_data = encode_typed_data(typed_data)
-        signed_message = self.account.sign_message(encoded_data)
-        
-        return signed_message.signature.hex()
-    
-    async def _request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Any:
-        """
-        Make HTTP request to Hyperliquid API.
-        
-        Args:
-            method: HTTP method
-            endpoint: API endpoint
-            params: Request parameters
-            
-        Returns:
-            Response data
-        """
-        if not self.session:
-            await self.connect()
-            
-        url = f"{self.base_url}{endpoint}"
-        
-        try:
-            if method == "GET":
-                response = await self.session.get(url, params=params)
-            elif method == "POST":
-                response = await self.session.post(url, json=params)
-            else:
-                raise ValueError(f"Unsupported method: {method}")
-            
-            if response.status_code == 429:
-                raise RateLimitError("Hyperliquid", "Rate limit exceeded")
-            
-            response.raise_for_status()
-            return response.json()
-            
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Hyperliquid API error: {e.response.text}")
-            raise ConnectorError(f"API error: {e.response.status_code}")
-        except Exception as e:
-            if isinstance(e, (RateLimitError, ConnectorError)):
-                raise
-            logger.error(f"Hyperliquid request failed: {e}")
-            raise ConnectorError(f"Request failed: {str(e)}")
+            logger.error(f"Authentication failed: {e}")
+            raise AuthenticationError(f"Authentication failed: {str(e)}")
     
     async def place_order(self, order: OrderRequest) -> OrderResponse:
         """Place an order on Hyperliquid."""
+        if not self.exchange:
+            raise AuthenticationError("Not authenticated")
+        
         try:
             # Convert symbol format (BTC-PERP -> BTC)
             coin = order.symbol.replace('-PERP', '')
             
-            # Build order action
-            order_action = {
-                "type": "order",
-                "orders": [{
-                    "a": int(order.symbol.split('-')[0]),  # Asset ID
-                    "b": order.side == OrderSide.BUY,
-                    "p": str(order.price) if order.order_type == OrderType.LIMIT else str(0),
-                    "s": str(order.quantity),
-                    "r": order.reduce_only if hasattr(order, 'reduce_only') else False,
-                    "t": {
-                        "limit": {"tif": "Gtc"},
-                        "market": {},
-                    }.get(order.order_type.value.lower(), {"limit": {"tif": "Gtc"}})
-                }]
-            }
+            # Build order type - SDK uses HLOrderType which is a TypedDict
+            if order.order_type == OrderType.LIMIT:
+                order_type = HLOrderType(limit={"tif": self._convert_tif(order.time_in_force)})
+            else:  # Market order
+                order_type = HLOrderType()  # Empty dict for market orders
             
-            timestamp = int(time.time() * 1000)
-            signature = self._sign_request(order_action, timestamp)
+            # Place order using SDK
+            result = self.exchange.order(
+                name=coin,  # SDK uses 'name' instead of 'coin'
+                is_buy=order.side == OrderSide.BUY,
+                sz=float(order.quantity),
+                limit_px=float(order.price) if order.order_type == OrderType.LIMIT else None,
+                order_type=order_type,
+                reduce_only=getattr(order, 'reduce_only', False)
+            )
             
-            request_data = {
-                "action": order_action,
-                "nonce": timestamp,
-                "signature": signature,
-            }
-            
-            if self.vault_address:
-                request_data["vaultAddress"] = self.vault_address
-            
-            result = await self._request("POST", "/exchange", request_data)
-            
+            # Parse response
             if result.get('status') == 'ok':
                 response_data = result.get('response', {}).get('data', {})
                 statuses = response_data.get('statuses', [{}])
                 
+                order_id = None
+                status = OrderStatus.NEW
+                filled_quantity = Decimal("0")
+                average_price = None
+                
                 if statuses and statuses[0].get('resting'):
-                    order_id = statuses[0]['resting'].get('oid')
+                    # Limit order resting on book
+                    order_id = str(statuses[0]['resting'].get('oid'))
                     status = OrderStatus.NEW
                 elif statuses and statuses[0].get('filled'):
-                    order_id = f"filled_{timestamp}"
+                    # Order filled immediately
+                    filled = statuses[0]['filled']
+                    order_id = str(filled.get('oid'))
                     status = OrderStatus.FILLED
+                    filled_quantity = Decimal(str(filled.get('totalSz', '0')))
+                    average_price = Decimal(str(filled.get('avgPx', '0')))
                 else:
-                    order_id = f"unknown_{timestamp}"
-                    status = OrderStatus.NEW
+                    # Unknown status, generate an ID
+                    order_id = f"HL_{int(datetime.now().timestamp() * 1000)}"
                 
                 return OrderResponse(
                     order_id=order_id,
+                    client_order_id=order.client_order_id,
                     symbol=order.symbol,
                     side=order.side,
                     order_type=order.order_type,
                     status=status,
-                    price=order.price,
+                    price=order.price if order.order_type == OrderType.LIMIT else average_price,
                     quantity=order.quantity,
-                    filled_quantity=Decimal("0"),
-                    average_price=None,
-                    fee=Decimal("0"),
+                    filled_quantity=filled_quantity,
+                    remaining_quantity=order.quantity - filled_quantity,
                     timestamp=datetime.now(timezone.utc),
+                    fee=Decimal("0"),
                 )
             else:
                 error_msg = result.get('response', {}).get('error', 'Unknown error')
-                if 'margin' in error_msg.lower():
+                if 'insufficient' in error_msg.lower() or 'margin' in error_msg.lower():
                     raise InsufficientBalanceError(error_msg)
                 elif 'invalid' in error_msg.lower():
                     raise InvalidOrderError(error_msg)
                 else:
-                    raise ConnectorError(f"Order placement failed: {error_msg}")
+                    raise ConnectorError(dex="hyperliquid", detail=f"Order placement failed: {error_msg}")
                     
         except Exception as e:
             if isinstance(e, (InsufficientBalanceError, InvalidOrderError, ConnectorError)):
                 raise
-            logger.error(f"Failed to place order on Hyperliquid: {e}")
-            raise ConnectorError(f"Order placement failed: {str(e)}")
+            logger.error(f"Failed to place order: {e}")
+            raise ConnectorError(dex="hyperliquid", detail=f"Order placement failed: {str(e)}")
     
-    async def cancel_order(self, symbol: str, order_id: str) -> bool:
+    async def cancel_order(self, order_id: str, symbol: Optional[str] = None) -> bool:
         """Cancel an order on Hyperliquid."""
+        if not self.exchange:
+            raise AuthenticationError("Not authenticated")
+        
         try:
-            coin = symbol.replace('-PERP', '')
+            coin = symbol.replace('-PERP', '') if symbol else None
             
-            cancel_action = {
-                "type": "cancel",
-                "cancels": [{
-                    "a": int(coin.split('-')[0]) if coin.isdigit() else 0,
-                    "o": order_id
-                }]
-            }
+            # If we don't have the coin, try to find it from open orders
+            if not coin:
+                orders = await self.get_orders()
+                for order in orders:
+                    if order.get('order_id') == order_id:
+                        coin = order.get('symbol', '').replace('-PERP', '')
+                        break
+                
+                if not coin:
+                    logger.warning(f"Order {order_id} not found in open orders")
+                    return False
             
-            timestamp = int(time.time() * 1000)
-            signature = self._sign_request(cancel_action, timestamp)
-            
-            request_data = {
-                "action": cancel_action,
-                "nonce": timestamp,
-                "signature": signature,
-            }
-            
-            if self.vault_address:
-                request_data["vaultAddress"] = self.vault_address
-            
-            result = await self._request("POST", "/exchange", request_data)
+            # Cancel using SDK
+            result = self.exchange.cancel(name=coin, oid=int(order_id))
             
             if result.get('status') == 'ok':
-                return True
-            elif result.get('status') == 'error':
-                error = result.get('response', {}).get('error', '')
-                if 'not found' in error.lower():
-                    raise OrderNotFoundError(f"Order {order_id} not found")
-                return False
-            else:
-                return False
+                response_data = result.get('response', {}).get('data', {})
+                statuses = response_data.get('statuses', [])
                 
-        except OrderNotFoundError:
-            raise
+                # Check if cancellation was successful
+                for status in statuses:
+                    if 'canceled' in status:
+                        return True
+                
+                # If no explicit canceled status, assume success if no error
+                return True
+            
+            return False
+            
         except Exception as e:
-            logger.error(f"Failed to cancel order on Hyperliquid: {e}")
+            logger.error(f"Failed to cancel order: {e}")
             return False
     
     async def modify_order(
-        self, symbol: str, order_id: str, modifications: Dict[str, Any]
+        self, order_id: str, modifications: Dict[str, Any], symbol: Optional[str] = None
     ) -> OrderResponse:
-        """Modify an existing order by canceling and replacing."""
+        """Modify an order by canceling and replacing."""
+        if not self.exchange:
+            raise AuthenticationError("Not authenticated")
+        
         try:
-            # Get current order
-            current_order = await self.get_order(symbol, order_id)
-            
             # Cancel existing order
-            cancelled = await self.cancel_order(symbol, order_id)
+            cancelled = await self.cancel_order(order_id, symbol)
             if not cancelled:
-                raise ConnectorError("Failed to cancel order for modification")
+                raise ConnectorError(dex="hyperliquid", detail="Failed to cancel order for modification")
+            
+            # Get order details from modifications or existing order
+            if not symbol:
+                orders = await self.get_orders()
+                for order in orders:
+                    if order.get('order_id') == order_id:
+                        symbol = order.get('symbol')
+                        break
+            
+            if not symbol:
+                raise OrderNotFoundError(f"Order {order_id} not found")
             
             # Create new order with modifications
-            new_order = OrderRequest(
-                symbol=symbol,
-                side=current_order.side,
-                order_type=current_order.order_type,
-                quantity=modifications.get('quantity', current_order.quantity),
-                price=modifications.get('price', current_order.price),
-                time_in_force=current_order.time_in_force,
+            coin = symbol.replace('-PERP', '')
+            
+            # Place new order
+            result = self.exchange.order(
+                name=coin,  # SDK uses 'name' instead of 'coin'
+                is_buy=modifications.get('side', OrderSide.BUY) == OrderSide.BUY,
+                sz=float(modifications.get('quantity', 0)),
+                limit_px=float(modifications.get('price', 0)),
+                order_type=HLOrderType(limit={"tif": "Gtc"}),
+                reduce_only=modifications.get('reduce_only', False)
             )
             
-            return await self.place_order(new_order)
+            # Parse and return response
+            return self._parse_order_response(result, symbol, modifications)
             
         except Exception as e:
             logger.error(f"Failed to modify order: {e}")
-            raise ConnectorError(f"Order modification failed: {str(e)}")
-    
-    async def get_order(self, symbol: str, order_id: str) -> Order:
-        """Get specific order by ID."""
-        orders = await self.get_orders(symbol=symbol)
-        for order in orders:
-            if order.order_id == order_id:
-                return order
-        raise OrderNotFoundError(f"Order {order_id} not found")
+            raise ConnectorError(dex="hyperliquid", detail=f"Order modification failed: {str(e)}")
     
     async def get_orders(
         self, symbol: Optional[str] = None, status: Optional[OrderStatus] = None
-    ) -> List[Order]:
+    ) -> List[Dict[str, Any]]:
         """Get orders from Hyperliquid."""
+        if not self.info or not self.address:
+            raise AuthenticationError("Not authenticated")
+        
         try:
-            # Get open orders
-            request_data = {
-                "type": "openOrders",
-                "user": self.address,
-            }
-            
-            result = await self._request("POST", "/info", request_data)
+            # Get open orders from SDK
+            open_orders = self.info.open_orders(self.address)
             
             orders = []
-            for order_data in result:
+            for order_data in open_orders:
                 order_symbol = f"{order_data['coin']}-PERP"
                 
                 # Filter by symbol if specified
                 if symbol and order_symbol != symbol:
                     continue
                 
-                order = Order(
-                    order_id=order_data['oid'],
-                    symbol=order_symbol,
-                    side=OrderSide.BUY if order_data['side'] == 'B' else OrderSide.SELL,
-                    order_type=OrderType.LIMIT,
-                    status=OrderStatus.NEW,
-                    price=Decimal(str(order_data['limitPx'])),
-                    quantity=Decimal(str(order_data['sz'])),
-                    filled_quantity=Decimal(str(order_data['sz'])) - Decimal(str(order_data.get('remainingSz', order_data['sz']))),
-                    average_price=None,
-                    fee=Decimal("0"),
-                    timestamp=datetime.fromtimestamp(order_data['timestamp'] / 1000, tz=timezone.utc),
-                    time_in_force=TimeInForce.GTC,
-                )
+                order = {
+                    "order_id": str(order_data['oid']),
+                    "symbol": order_symbol,
+                    "side": "BUY" if order_data['side'] == 'B' else "SELL",
+                    "order_type": "LIMIT",
+                    "status": "NEW",
+                    "price": Decimal(str(order_data['limitPx'])),
+                    "quantity": Decimal(str(order_data['sz'])),
+                    "filled_quantity": Decimal(str(order_data['sz'])) - Decimal(str(order_data.get('remainingSz', order_data['sz']))),
+                    "average_price": None,
+                    "fee": Decimal("0"),
+                    "timestamp": datetime.fromtimestamp(order_data['timestamp'] / 1000, tz=timezone.utc),
+                    "time_in_force": "GTC",
+                }
                 
                 # Filter by status if specified
-                if status and order.status != status:
+                if status and status.value != "NEW":
                     continue
                     
                 orders.append(order)
@@ -429,47 +340,47 @@ class HyperliquidConnector(BaseConnector):
             logger.error(f"Failed to get orders: {e}")
             return []
     
-    async def get_open_orders(self, symbol: Optional[str] = None) -> List[Order]:
-        """Get all open orders."""
-        return await self.get_orders(symbol=symbol, status=OrderStatus.NEW)
-    
-    async def get_positions(self, symbol: Optional[str] = None) -> List[Position]:
+    async def get_positions(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get positions from Hyperliquid."""
+        if not self.info or not self.address:
+            raise AuthenticationError("Not authenticated")
+        
         try:
-            request_data = {
-                "type": "clearinghouseState",
-                "user": self.address,
-            }
-            
-            result = await self._request("POST", "/info", request_data)
+            # Get user state which includes positions
+            user_state = self.info.user_state(self.address)
             
             positions = []
-            asset_positions = result.get('assetPositions', [])
-            
-            for pos_data in asset_positions:
-                position_info = pos_data.get('position', {})
-                if position_info and float(position_info.get('szi', 0)) != 0:
-                    pos_symbol = f"{position_info['coin']}-PERP"
+            if user_state and 'assetPositions' in user_state:
+                for asset_position in user_state['assetPositions']:
+                    pos_info = asset_position.get('position', {})
                     
-                    # Filter by symbol if specified
-                    if symbol and pos_symbol != symbol:
-                        continue
-                    
-                    size = float(position_info['szi'])
-                    position = Position(
-                        symbol=pos_symbol,
-                        side="LONG" if size > 0 else "SHORT",
-                        quantity=abs(Decimal(str(size))),
-                        entry_price=Decimal(str(position_info['entryPx'])),
-                        mark_price=Decimal(str(position_info.get('markPx', 0))),
-                        unrealized_pnl=Decimal(str(position_info.get('unrealizedPnl', 0))),
-                        realized_pnl=Decimal(str(position_info.get('realizedPnl', 0))),
-                        margin_used=Decimal(str(position_info.get('marginUsed', 0))),
-                        liquidation_price=Decimal(str(position_info.get('liquidationPx', 0))) if position_info.get('liquidationPx') else None,
-                        leverage=int(position_info.get('leverage', 1)),
-                        timestamp=datetime.now(timezone.utc),
-                    )
-                    positions.append(position)
+                    if pos_info and float(pos_info.get('szi', 0)) != 0:
+                        pos_symbol = f"{pos_info['coin']}-PERP"
+                        
+                        # Filter by symbol if specified
+                        if symbol and pos_symbol != symbol:
+                            continue
+                        
+                        size = float(pos_info['szi'])
+                        
+                        # Extract leverage - it's a dict with 'type' and 'value'
+                        leverage_info = pos_info.get('leverage', {})
+                        leverage_value = leverage_info.get('value', 1) if isinstance(leverage_info, dict) else 1
+                        
+                        position = {
+                            "symbol": pos_symbol,
+                            "side": "LONG" if size > 0 else "SHORT",
+                            "quantity": abs(Decimal(str(size))),
+                            "entry_price": Decimal(str(pos_info.get('entryPx', 0))),
+                            "mark_price": Decimal(str(pos_info.get('markPx', 0))),
+                            "unrealized_pnl": Decimal(str(pos_info.get('unrealizedPnl', 0))),
+                            "realized_pnl": Decimal(str(pos_info.get('realizedPnl', 0))),
+                            "margin_used": Decimal(str(pos_info.get('marginUsed', 0))),
+                            "liquidation_price": Decimal(str(pos_info.get('liquidationPx', 0))) if pos_info.get('liquidationPx') else None,
+                            "leverage": int(leverage_value),
+                            "timestamp": datetime.now(timezone.utc),
+                        }
+                        positions.append(position)
             
             return positions
             
@@ -477,261 +388,295 @@ class HyperliquidConnector(BaseConnector):
             logger.error(f"Failed to get positions: {e}")
             return []
     
+    async def get_account_info(self) -> Dict[str, Any]:
+        """Get account information from Hyperliquid."""
+        if not self.info or not self.address:
+            raise AuthenticationError("Not authenticated")
+        
+        try:
+            # Get user state
+            user_state = self.info.user_state(self.address)
+            
+            if not user_state:
+                # New account with no activity
+                return {
+                    "equity": Decimal("0"),
+                    "balance": Decimal("0"),
+                    "margin_used": Decimal("0"),
+                    "free_margin": Decimal("0"),
+                    "margin_ratio": Decimal("0"),
+                    "position_value": Decimal("0"),
+                    "unrealized_pnl": Decimal("0"),
+                    "realized_pnl": Decimal("0"),
+                    "timestamp": datetime.now(timezone.utc),
+                }
+            
+            margin_summary = user_state.get('marginSummary', {})
+            cross_margin = user_state.get('crossMarginSummary', {})
+            
+            return {
+                "equity": Decimal(str(cross_margin.get('accountValue', 0))),
+                "balance": Decimal(str(cross_margin.get('totalRawUsd', 0))),
+                "margin_used": Decimal(str(margin_summary.get('totalMarginUsed', 0))),
+                "free_margin": Decimal(str(user_state.get('withdrawable', 0))),
+                "margin_ratio": Decimal("0"),
+                "position_value": Decimal(str(margin_summary.get('totalNtlPos', 0))),
+                "unrealized_pnl": Decimal("0"),
+                "realized_pnl": Decimal("0"),
+                "timestamp": datetime.now(timezone.utc),
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get account info: {e}")
+            raise ConnectorError(dex="hyperliquid", detail=f"Failed to get account info: {str(e)}")
+    
+    async def get_market_data(self, symbol: str) -> Dict[str, Any]:
+        """Get market data for a symbol."""
+        if not self.info:
+            raise ConnectorError(dex="hyperliquid", detail="Not connected")
+        
+        try:
+            coin = symbol.replace('-PERP', '')
+            
+            # Get meta and asset contexts for complete market data
+            meta_and_contexts = self.info.meta_and_asset_ctxs()
+            
+            if isinstance(meta_and_contexts, list) and len(meta_and_contexts) >= 2:
+                meta = meta_and_contexts[0]
+                contexts = meta_and_contexts[1]
+                
+                # Find the coin's context
+                coin_index = None
+                for i, asset in enumerate(meta.get('universe', [])):
+                    if asset.get('name') == coin:
+                        coin_index = i
+                        break
+                
+                if coin_index is not None and coin_index < len(contexts):
+                    ctx = contexts[coin_index]
+                    
+                    return {
+                        "symbol": symbol,
+                        "mark_price": Decimal(str(ctx.get('markPx', 0))),
+                        "mid_price": Decimal(str(ctx.get('midPx', 0))),
+                        "index_price": Decimal(str(ctx.get('markPx', 0))),
+                        "last_price": Decimal(str(ctx.get('midPx', 0))),
+                        "bid_price": Decimal("0"),
+                        "ask_price": Decimal("0"),
+                        "volume_24h": Decimal(str(ctx.get('dayNtlVlm', 0))),
+                        "open_interest": Decimal(str(ctx.get('openInterest', 0))),
+                        "funding_rate": Decimal(str(ctx.get('funding', 0))),
+                        "next_funding_time": None,
+                        "timestamp": datetime.now(timezone.utc),
+                    }
+            
+            # Fallback to simple price data
+            all_mids = self.info.all_mids()
+            mid_price = Decimal(str(all_mids.get(coin, 0)))
+            
+            return {
+                "symbol": symbol,
+                "mark_price": mid_price,
+                "mid_price": mid_price,
+                "index_price": Decimal("0"),
+                "last_price": mid_price,
+                "bid_price": Decimal("0"),
+                "ask_price": Decimal("0"),
+                "volume_24h": Decimal("0"),
+                "open_interest": Decimal("0"),
+                "funding_rate": Decimal("0"),
+                "next_funding_time": None,
+                "timestamp": datetime.now(timezone.utc),
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get market data: {e}")
+            raise ConnectorError(dex="hyperliquid", detail=f"Failed to get market data: {str(e)}")
+    
+    async def get_order_book(
+        self, symbol: str, depth: int = 20
+    ) -> Dict[str, Any]:
+        """Get order book for a symbol."""
+        if not self.info:
+            raise ConnectorError(dex="hyperliquid", detail="Not connected")
+        
+        try:
+            coin = symbol.replace('-PERP', '')
+            
+            # Get L2 book from SDK
+            book = self.info.l2_snapshot(coin)
+            
+            bids = []
+            asks = []
+            
+            if book and 'levels' in book:
+                # SDK returns levels as [bids_list, asks_list]
+                levels = book['levels']
+                if isinstance(levels, list) and len(levels) == 2:
+                    # First list contains bids
+                    for bid in levels[0][:depth]:  # Limit to depth
+                        bids.append([
+                            Decimal(str(bid['px'])),
+                            Decimal(str(bid['sz']))
+                        ])
+                    
+                    # Second list contains asks
+                    for ask in levels[1][:depth]:  # Limit to depth
+                        asks.append([
+                            Decimal(str(ask['px'])),
+                            Decimal(str(ask['sz']))
+                        ])
+                
+                # Bids should already be sorted (highest first)
+                # Asks should already be sorted (lowest first)
+            
+            return {
+                "symbol": symbol,
+                "bids": bids,
+                "asks": asks,
+                "timestamp": datetime.now(timezone.utc),
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get order book: {e}")
+            raise ConnectorError(dex="hyperliquid", detail=f"Failed to get order book: {str(e)}")
+    
+    async def subscribe_to_updates(
+        self, symbols: List[str], channels: List[str]
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Subscribe to WebSocket updates."""
+        # WebSocket subscriptions can be implemented using the SDK's WebSocket support
+        # For now, return empty iterator
+        yield {}
+    
+    async def unsubscribe_from_updates(self) -> bool:
+        """Unsubscribe from all WebSocket updates."""
+        return True
+    
+    async def get_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
+        """Get specific order by ID."""
+        orders = await self.get_orders(symbol=symbol)
+        for order in orders:
+            if order.get('order_id') == order_id:
+                return order
+        raise OrderNotFoundError(f"Order {order_id} not found")
+    
+    async def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get all open orders."""
+        return await self.get_orders(symbol=symbol, status=OrderStatus.NEW)
+    
+    async def get_balance(self, asset: Optional[str] = None) -> Dict[str, Decimal]:
+        """Get balance for specific asset or all assets."""
+        account_info = await self.get_account_info()
+        if asset:
+            # Hyperliquid uses USDC as base currency
+            if asset.upper() in ['USDC', 'USD']:
+                return {asset: account_info.get('balance', Decimal('0'))}
+            return {asset: Decimal('0')}
+        return {'USDC': account_info.get('balance', Decimal('0'))}
+    
+    async def get_funding_rate(self, symbol: str) -> Decimal:
+        """Get current funding rate for a symbol."""
+        market_data = await self.get_market_data(symbol)
+        return market_data.get('funding_rate', Decimal('0'))
+    
+    async def get_recent_trades(self, symbol: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get recent trades for a symbol."""
+        if not self.info:
+            raise ConnectorError(dex="hyperliquid", detail="Not connected")
+        
+        try:
+            coin = symbol.replace('-PERP', '')
+            # The SDK doesn't have a direct recent trades method, so return empty for now
+            # This could be implemented using the WebSocket feed
+            return []
+        except Exception as e:
+            logger.error(f"Failed to get recent trades: {e}")
+            return []
+    
+    async def set_leverage(self, symbol: str, leverage: int) -> bool:
+        """Set leverage for a symbol."""
+        if not self.exchange:
+            raise AuthenticationError("Not authenticated")
+        
+        try:
+            coin = symbol.replace('-PERP', '')
+            # Hyperliquid SDK has update_leverage method
+            result = self.exchange.update_leverage(leverage, coin)
+            return result.get('status') == 'ok'
+        except Exception as e:
+            logger.error(f"Failed to set leverage: {e}")
+            return False
+    
     async def close_position(
         self, symbol: str, quantity: Optional[Decimal] = None
     ) -> OrderResponse:
         """Close a position."""
         positions = await self.get_positions(symbol=symbol)
         if not positions:
-            raise ConnectorError(f"No position found for {symbol}")
+            raise ConnectorError(dex="hyperliquid", detail=f"No position found for {symbol}")
         
         position = positions[0]
-        close_qty = quantity or position.quantity
-        close_side = OrderSide.SELL if position.side == "LONG" else OrderSide.BUY
+        close_qty = quantity or position.get('quantity')
+        close_side = OrderSide.SELL if position.get('side') == "LONG" else OrderSide.BUY
         
         order_request = OrderRequest(
             symbol=symbol,
             side=close_side,
             order_type=OrderType.MARKET,
             quantity=close_qty,
-            reduce_only=True,
+            price=Decimal("0"),
+            time_in_force=TimeInForce.IOC,
+            reduce_only=True
         )
         
         return await self.place_order(order_request)
     
-    async def get_account_info(self) -> AccountInfo:
-        """Get account information from Hyperliquid."""
-        try:
-            request_data = {
-                "type": "clearinghouseState", 
-                "user": self.address,
-            }
-            
-            result = await self._request("POST", "/info", request_data)
-            
-            margin_summary = result.get('marginSummary', {})
-            
-            return AccountInfo(
-                equity=Decimal(str(margin_summary.get('accountValue', 0))),
-                balance=Decimal(str(margin_summary.get('totalRawUsd', 0))),
-                margin_used=Decimal(str(margin_summary.get('totalMarginUsed', 0))),
-                free_margin=Decimal(str(result.get('withdrawable', 0))),
-                margin_ratio=Decimal("0"),
-                position_value=Decimal(str(margin_summary.get('totalNtlPos', 0))),
-                unrealized_pnl=Decimal("0"),
-                realized_pnl=Decimal("0"),
-                timestamp=datetime.now(timezone.utc),
-            )
-            
-        except Exception as e:
-            logger.error(f"Failed to get account info: {e}")
-            raise ConnectorError(f"Failed to get account info: {str(e)}")
+    # Helper methods
     
-    async def get_balance(self, asset: Optional[str] = None) -> Dict[str, Decimal]:
-        """Get balance for specific asset or all assets."""
-        account_info = await self.get_account_info()
-        if asset:
-            return {asset: account_info.free_margin}
-        return {"USDC": account_info.free_margin}
+    def _convert_tif(self, tif: TimeInForce) -> str:
+        """Convert TimeInForce to Hyperliquid format."""
+        tif_map = {
+            TimeInForce.GTC: "Gtc",
+            TimeInForce.IOC: "Ioc",
+            TimeInForce.FOK: "Alo",  # All or nothing
+            TimeInForce.POST_ONLY: "Gtc",  # Post-only not directly supported
+        }
+        return tif_map.get(tif, "Gtc")
     
-    async def set_leverage(self, symbol: str, leverage: int) -> bool:
-        """Set leverage for a symbol."""
-        try:
-            coin = symbol.replace('-PERP', '')
+    def _parse_order_response(self, result: Dict, symbol: str, order_data: Dict) -> OrderResponse:
+        """Parse order response from SDK."""
+        if result.get('status') == 'ok':
+            response_data = result.get('response', {}).get('data', {})
+            statuses = response_data.get('statuses', [{}])
             
-            leverage_action = {
-                "type": "updateLeverage",
-                "asset": int(coin.split('-')[0]) if coin.isdigit() else 0,
-                "isCross": True,
-                "leverage": leverage,
-            }
+            order_id = None
+            status = OrderStatus.NEW
+            filled_quantity = Decimal("0")
+            average_price = None
             
-            timestamp = int(time.time() * 1000)
-            signature = self._sign_request(leverage_action, timestamp)
+            if statuses and statuses[0].get('resting'):
+                order_id = str(statuses[0]['resting'].get('oid'))
+                status = OrderStatus.NEW
+            elif statuses and statuses[0].get('filled'):
+                filled = statuses[0]['filled']
+                order_id = str(filled.get('oid'))
+                status = OrderStatus.FILLED
+                filled_quantity = Decimal(str(filled.get('totalSz', '0')))
+                average_price = Decimal(str(filled.get('avgPx', '0')))
             
-            request_data = {
-                "action": leverage_action,
-                "nonce": timestamp,
-                "signature": signature,
-            }
-            
-            if self.vault_address:
-                request_data["vaultAddress"] = self.vault_address
-            
-            result = await self._request("POST", "/exchange", request_data)
-            
-            return result.get('status') == 'ok'
-            
-        except Exception as e:
-            logger.error(f"Failed to set leverage: {e}")
-            return False
-    
-    async def get_market_data(self, symbol: str) -> MarketData:
-        """Get market data for a symbol."""
-        try:
-            coin = symbol.replace('-PERP', '')
-            
-            # Get metadata
-            meta_result = await self._request("POST", "/info", {"type": "meta"})
-            
-            # Find asset info
-            asset_info = None
-            for asset in meta_result.get('universe', []):
-                if asset['name'] == coin:
-                    asset_info = asset
-                    break
-            
-            if not asset_info:
-                raise ConnectorError(f"Symbol {symbol} not found")
-            
-            # Get current prices
-            prices_result = await self._request("POST", "/info", {"type": "allMids"})
-            
-            # Find price for this coin
-            price_info = None
-            for price_data in prices_result:
-                if price_data['coin'] == coin:
-                    price_info = price_data
-                    break
-            
-            return MarketData(
+            return OrderResponse(
+                order_id=order_id or f"HL_{int(datetime.now().timestamp() * 1000)}",
                 symbol=symbol,
-                mark_price=Decimal(str(price_info['markPx'])) if price_info else Decimal("0"),
-                index_price=Decimal("0"),
-                last_price=Decimal(str(price_info['midPx'])) if price_info else Decimal("0"),
-                bid_price=Decimal("0"),
-                ask_price=Decimal("0"),
-                volume_24h=Decimal(str(price_info['dayNtlVlm'])) if price_info else Decimal("0"),
-                open_interest=Decimal(str(price_info['openInterest'])) if price_info else Decimal("0"),
-                funding_rate=Decimal(str(price_info['fundingRate'])) if price_info else Decimal("0"),
-                next_funding_time=None,
+                side=order_data.get('side', OrderSide.BUY),
+                order_type=OrderType.LIMIT,
+                status=status,
+                price=Decimal(str(order_data.get('price', 0))),
+                quantity=Decimal(str(order_data.get('quantity', 0))),
+                filled_quantity=filled_quantity,
+                average_price=average_price,
+                fee=Decimal("0"),
                 timestamp=datetime.now(timezone.utc),
             )
-            
-        except Exception as e:
-            logger.error(f"Failed to get market data: {e}")
-            raise ConnectorError(f"Failed to get market data: {str(e)}")
-    
-    async def get_order_book(
-        self, symbol: str, depth: int = 20
-    ) -> Dict[str, Any]:
-        """Get order book for a symbol."""
-        try:
-            coin = symbol.replace('-PERP', '')
-            
-            request_data = {
-                "type": "l2Book",
-                "coin": coin,
-            }
-            
-            result = await self._request("POST", "/info", request_data)
-            
-            levels = result.get('levels', [[]])
-            bids = levels[0][:depth] if len(levels) > 0 else []
-            asks = levels[1][:depth] if len(levels) > 1 else []
-            
-            return {
-                "symbol": symbol,
-                "bids": [[Decimal(b['px']), Decimal(b['sz'])] for b in bids],
-                "asks": [[Decimal(a['px']), Decimal(a['sz'])] for a in asks],
-                "timestamp": datetime.now(timezone.utc),
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to get order book: {e}")
-            return {"symbol": symbol, "bids": [], "asks": [], "timestamp": datetime.now(timezone.utc)}
-    
-    async def get_recent_trades(
-        self, symbol: str, limit: int = 100
-    ) -> List[Dict[str, Any]]:
-        """Get recent trades for a symbol."""
-        try:
-            coin = symbol.replace('-PERP', '')
-            
-            request_data = {
-                "type": "recentTrades",
-                "coin": coin,
-            }
-            
-            trades = await self._request("POST", "/info", request_data)
-            
-            formatted = []
-            for trade in trades[:limit]:
-                formatted.append({
-                    "symbol": symbol,
-                    "price": Decimal(str(trade.get("px", 0))),
-                    "quantity": Decimal(str(trade.get("sz", 0))),
-                    "side": "BUY" if trade.get("side") == "B" else "SELL",
-                    "timestamp": datetime.fromtimestamp(trade.get("time", 0) / 1000, tz=timezone.utc),
-                })
-            
-            return formatted
-            
-        except Exception as e:
-            logger.error(f"Failed to get recent trades: {e}")
-            return []
-    
-    async def get_funding_rate(self, symbol: str) -> Dict[str, Any]:
-        """Get funding rate for a symbol."""
-        market_data = await self.get_market_data(symbol)
-        return {
-            "symbol": symbol,
-            "funding_rate": market_data.funding_rate,
-            "next_funding_time": market_data.next_funding_time,
-            "timestamp": market_data.timestamp,
-        }
-    
-    async def subscribe_to_updates(
-        self, channels: List[str]
-    ) -> AsyncIterator[Dict[str, Any]]:
-        """Subscribe to real-time updates via WebSocket."""
-        ws_url = self.ws_url
-        
-        async with websockets.connect(ws_url) as ws:
-            self.ws_connection = ws
-            
-            # Subscribe to channels
-            for channel in channels:
-                sub_msg = {
-                    "method": "subscribe",
-                    "subscription": {"type": channel},
-                }
-                await ws.send(json.dumps(sub_msg))
-            
-            # Yield updates
-            try:
-                while True:
-                    msg = await ws.recv()
-                    data = json.loads(msg)
-                    yield data
-            finally:
-                self.ws_connection = None
-    
-    async def unsubscribe_from_updates(self, channels: List[str]) -> bool:
-        """Unsubscribe from WebSocket updates."""
-        if self.ws_connection:
-            for channel in channels:
-                unsub_msg = {
-                    "method": "unsubscribe",
-                    "subscription": {"type": channel},
-                }
-                await self.ws_connection.send(json.dumps(unsub_msg))
-        return True
-    
-    async def get_server_time(self) -> datetime:
-        """Get server time."""
-        return datetime.now(timezone.utc)
-    
-    async def get_exchange_info(self) -> Dict[str, Any]:
-        """Get exchange information."""
-        meta_result = await self._request("POST", "/info", {"type": "meta"})
-        return meta_result
-    
-    async def get_trading_fees(self, symbol: Optional[str] = None) -> Dict[str, Any]:
-        """Get trading fees."""
-        # Hyperliquid has standard fees
-        return {
-            "maker_fee": Decimal("0.0002"),  # 0.02%
-            "taker_fee": Decimal("0.0005"),  # 0.05%
-            "symbol": symbol,
-        }
+        else:
+            raise ConnectorError(dex="hyperliquid", detail="Order failed")
