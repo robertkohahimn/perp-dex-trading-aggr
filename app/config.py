@@ -41,6 +41,10 @@ class DatabaseSettings(BaseSettings):
         default="postgresql+asyncpg://user:password@localhost:5432/perp_dex_db",
         description="Database connection URL"
     )
+    redis_url: str = Field(
+        default="redis://localhost:6379/0",
+        description="Redis connection URL"
+    )
     database_pool_size: int = Field(default=20, description="Connection pool size")
     database_max_overflow: int = Field(default=40, description="Max overflow connections")
     database_pool_timeout: int = Field(default=30, description="Pool timeout in seconds")

@@ -14,7 +14,10 @@ import uuid
 from app.config import settings
 from app.core.logging import setup_logging, get_logger
 from app.core.exceptions import BaseAPIException
+from app.core.redis_client import redis_client
 from database.session import init_database, close_database
+from app.api.v1.routes import auth, trading
+from app.api.v1.websocket import websocket_endpoint, websocket_market_data, websocket_notifications
 
 # Set up logging
 setup_logging()
@@ -45,9 +48,15 @@ async def lifespan(app: FastAPI):
         if settings.is_production():
             raise
     
-    # Initialize other services here
-    # await init_redis()
-    # await init_connectors()
+    # Initialize Redis
+    try:
+        await redis_client.connect()
+        logger.info("Redis connected")
+    except Exception as e:
+        logger.error("Failed to connect to Redis", error=str(e))
+        # Redis is optional in development
+        if settings.is_production():
+            raise
     
     yield
     
@@ -55,9 +64,8 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down application")
     
     # Clean up resources
+    await redis_client.disconnect()
     await close_database()
-    # await close_redis()
-    # await close_connectors()
     
     logger.info("Application shutdown complete")
 
@@ -236,9 +244,13 @@ async def health_check():
 
 
 # Include API routers
-# TODO: Import and include routers
-# from app.api.v1.routes import trading, accounts, positions, markets
-# app.include_router(trading.router, prefix=f"{settings.app.api_prefix}/v1/trading", tags=["trading"])
+app.include_router(auth.router, prefix=f"{settings.app.api_prefix}/v1", tags=["auth"])
+app.include_router(trading.router, prefix=f"{settings.app.api_prefix}/v1", tags=["trading"])
+
+# Add WebSocket routes
+app.add_websocket_route("/ws", websocket_endpoint)
+app.add_websocket_route("/ws/market/{symbol}/{dex}", websocket_market_data)
+app.add_websocket_route("/ws/notifications", websocket_notifications)
 # app.include_router(accounts.router, prefix=f"{settings.app.api_prefix}/v1/accounts", tags=["accounts"])
 # app.include_router(positions.router, prefix=f"{settings.app.api_prefix}/v1/positions", tags=["positions"])
 # app.include_router(markets.router, prefix=f"{settings.app.api_prefix}/v1/markets", tags=["markets"])

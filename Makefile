@@ -26,11 +26,29 @@ run: ## Run the application in production mode
 dev: ## Run the application in development mode with auto-reload
 	uvicorn $(APP) --host $(HOST) --port $(PORT) --reload
 
-test: ## Run tests
+test: ## Run all tests
 	pytest tests/ -v
 
-test-cov: ## Run tests with coverage
+test-unit: ## Run unit tests only
+	pytest tests/unit -v -m unit
+
+test-integration: ## Run integration tests only
+	pytest tests/integration -v -m integration
+
+test-fast: ## Run fast tests (exclude slow)
+	pytest tests/ -v -m "not slow"
+
+test-cov: ## Run tests with coverage report
 	pytest tests/ --cov=app --cov=connectors --cov=services --cov-report=html --cov-report=term
+
+test-watch: ## Run tests in watch mode
+	pytest-watch tests/ -v
+
+test-debug: ## Run tests with debug output
+	pytest tests/ -vvs --tb=long --log-cli-level=DEBUG
+
+test-parallel: ## Run tests in parallel
+	pytest tests/ -v -n auto
 
 lint: ## Run linters
 	flake8 app/ connectors/ services/ models/
