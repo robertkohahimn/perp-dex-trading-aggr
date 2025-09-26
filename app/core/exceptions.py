@@ -146,13 +146,20 @@ class TradingException(BaseAPIException):
 
 class InsufficientBalanceException(TradingException):
     """Insufficient balance for trade"""
-    def __init__(self, required: float, available: float, **kwargs):
-        super().__init__(
-            detail=f"Insufficient balance. Required: {required}, Available: {available}",
-            error_code="INSUFFICIENT_BALANCE",
-            context={"required": required, "available": available},
-            **kwargs
-        )
+    def __init__(self, required: float = 0, available: float = 0, detail: Optional[str] = None, **kwargs):
+        if detail:
+            super().__init__(
+                detail=detail,
+                error_code="INSUFFICIENT_BALANCE",
+                **kwargs
+            )
+        else:
+            super().__init__(
+                detail=f"Insufficient balance. Required: {required}, Available: {available}",
+                error_code="INSUFFICIENT_BALANCE",
+                context={"required": required, "available": available},
+                **kwargs
+            )
 
 
 class OrderNotFoundException(TradingException):
@@ -279,5 +286,125 @@ class RateLimitException(BaseAPIException):
             error_code="RATE_LIMIT_EXCEEDED",
             headers={"Retry-After": str(retry_after)},
             context={"retry_after": retry_after},
+            **kwargs
+        )
+
+
+# Account Exceptions  
+class AccountNotFoundException(ResourceNotFoundException):
+    """Account not found"""
+    def __init__(self, account_name: str, dex: Optional[str] = None, **kwargs):
+        detail = f"Account {account_name} not found"
+        if dex:
+            detail += f" for {dex}"
+        super().__init__(
+            resource="Account",
+            detail=detail,
+            **kwargs
+        )
+
+
+class AccountAlreadyExistsException(ResourceAlreadyExistsException):
+    """Account already exists"""
+    def __init__(self, account_name: str, dex: Optional[str] = None, **kwargs):
+        detail = f"Account {account_name} already exists"
+        if dex:
+            detail += f" for {dex}"
+        super().__init__(
+            resource="Account", 
+            detail=detail,
+            **kwargs
+        )
+
+
+class AccountNotFoundError(Exception):
+    """Account not found error for internal use"""
+    pass
+
+
+class AccountAlreadyExistsError(Exception):
+    """Account already exists error for internal use"""
+    pass
+
+
+class InvalidCredentialsError(Exception):
+    """Invalid credentials error for internal use"""
+    pass
+
+
+class DatabaseError(Exception):
+    """Database error for internal use"""
+    pass
+
+
+# Order Exceptions
+class OrderNotFoundError(Exception):
+    """Order not found error for internal use"""
+    pass
+
+
+class InsufficientBalanceError(Exception):
+    """Insufficient balance error for internal use"""
+    pass
+
+
+class OrderExecutionError(Exception):
+    """Order execution error for internal use"""
+    pass
+
+
+# Connector Exceptions
+class ConnectorNotFoundError(Exception):
+    """Connector not found error for internal use"""
+    pass
+
+
+class MarketDataNotAvailableError(Exception):
+    """Market data not available error"""
+    pass
+
+
+class TokenExpiredError(Exception):
+    """JWT token expired error"""
+    pass
+
+
+class UnauthorizedException(AuthenticationException):
+    """Unauthorized access exception"""
+    def __init__(self, detail: str = "Unauthorized access", **kwargs):
+        super().__init__(detail=detail, **kwargs)
+
+
+class InvalidOrderError(TradingException):
+    """Invalid order parameters"""
+    def __init__(self, detail: str = "Invalid order parameters", **kwargs):
+        super().__init__(detail=detail, error_code="INVALID_ORDER", **kwargs)
+
+
+class RateLimitError(DEXException):
+    """Rate limit error"""
+    def __init__(self, dex: str = "", detail: str = "Rate limit exceeded", **kwargs):
+        super().__init__(dex=dex, detail=detail, error_code="RATE_LIMIT", **kwargs)
+
+
+class ConnectorError(DEXException):
+    """Connector error"""
+    def __init__(self, dex: str = "", detail: str = "Connector error", **kwargs):
+        super().__init__(dex=dex, detail=detail, error_code="CONNECTOR_ERROR", **kwargs)
+
+
+class AuthenticationError(AuthenticationException):
+    """Authentication error"""
+    def __init__(self, detail: str = "Authentication failed", **kwargs):
+        super().__init__(detail=detail, **kwargs)
+
+
+class ConnectorException(DEXException):
+    """Connector exception"""
+    def __init__(self, connector: str, detail: str = "Connector error", **kwargs):
+        super().__init__(
+            dex=connector,
+            detail=detail,
+            error_code="CONNECTOR_ERROR",
             **kwargs
         )

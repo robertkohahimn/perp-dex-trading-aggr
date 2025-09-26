@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Testing
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+*.log
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+dump.rdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.*
+
+# Temporary files
+*.tmp
+*.bak
+test_*.py

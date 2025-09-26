@@ -16,6 +16,7 @@ class Account(Base):
     is_active = Column(Boolean, default=True, nullable=False)
     
     # Security
+    password_hash = Column(String(255))
     api_key_hash = Column(String(255), unique=True, index=True)
     
     # Settings
