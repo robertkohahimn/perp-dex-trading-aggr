@@ -15,3 +15,7 @@
 
 # Vest
 - API: https://docs.vestmarkets.com/vest-api
+
+# Pacifica:
+- API: https://docs.pacifica.fi/api-documentation/api
+_ Python SDK: https://github.com/pacifica-fi/python-sdk

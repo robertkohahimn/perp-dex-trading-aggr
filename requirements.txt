@@ -3,6 +3,7 @@ fastapi==0.104.1
 uvicorn[standard]==0.24.0
 pydantic==2.5.0
 pydantic-settings==2.1.0
+email-validator==2.1.0  # For pydantic email validation
 
 # Database
 sqlalchemy==2.0.23
@@ -15,7 +16,7 @@ redis==5.0.1
 hiredis==2.2.3  # C parser for improved performance
 
 # Async HTTP
-httpx==0.25.1
+httpx==0.28.0
 aiohttp==3.9.1
 websockets==12.0
 
@@ -26,8 +27,8 @@ python-multipart==0.0.6
 cryptography==41.0.7
 
 # DEX SDKs (optional - install as needed)
-# hyperliquid-python-sdk>=0.19.0
-# x10-python-trading-starknet>=0.1.0  # Extended SDK
+hyperliquid-python-sdk==0.19.0
+x10-python-trading-starknet>=0.1.0  # Extended SDK
 # lighter-python (install from git: pip install git+https://github.com/elliottech/lighter-python.git)
 
 # Ethereum utilities (for Vest signing)
@@ -53,7 +54,7 @@ pendulum==3.0.0  # Better datetime handling
 pyyaml==6.0.1
 
 # Development & Testing
-pytest==7.4.3
+pytest==8.0.0
 pytest-asyncio==0.21.1
 pytest-cov==4.1.0
 pytest-httpx==0.35.0

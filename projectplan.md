@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-This document outlines the comprehensive plan for building a modular Python backend for Vamient's perpetual DEX trading terminal. The backend will support multiple perpetual DEX platforms (Hyperliquid, Lighter, Extended, EdgeX, Vest) with a unified API interface for the trading terminal.
+This document outlines the comprehensive plan for building a modular Python backend for Vamient's perpetual DEX trading terminal. The backend will support multiple perpetual DEX platforms (Hyperliquid, Lighter, Extended, EdgeX, Vest, Pacifica) with a unified API interface for the trading terminal.
 
 ## Core Requirements
 
@@ -42,6 +42,7 @@ This document outlines the comprehensive plan for building a modular Python back
 - **Extended**: x10xchange python_sdk
 - **EdgeX**: Custom REST implementation
 - **Vest**: Custom REST implementation
+- **Pacifica**: pacifica-python-sdk
 
 ## Architecture Overview
 
@@ -73,9 +74,9 @@ This document outlines the comprehensive plan for building a modular Python back
 │     (Unified interface for all DEX integrations)         │
 └─────────────────────────────────────────────────────────┘
                             ↕
-┌──────────┬──────────┬──────────┬──────────┬────────────┐
-│Hyperliquid│ Lighter │ Extended │  EdgeX   │   Vest     │
-└──────────┴──────────┴──────────┴──────────┴────────────┘
+┌──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐
+│Hyperliquid│ Lighter │ Extended │  EdgeX   │   Vest   │ Pacifica │
+└──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘
                             ↕
 ┌─────────────────────────────────────────────────────────┐
 │              Database & Cache (PostgreSQL/Redis)         │
@@ -86,6 +87,21 @@ This document outlines the comprehensive plan for building a modular Python back
 
 ```
 perp-dex-backend/
+├── cli/
+│   ├── __init__.py
+│   ├── main.py                    # CLI application entry point
+│   ├── config.py                  # CLI configuration management
+│   ├── commands/
+│   │   ├── __init__.py
+│   │   ├── account.py            # Account management commands
+│   │   ├── trade.py              # Trading commands
+│   │   ├── position.py           # Position management commands
+│   │   ├── market.py             # Market data commands
+│   │   ├── monitor.py            # Real-time monitoring commands
+│   │   └── config_cmd.py         # Configuration commands
+│   └── interactive/
+│       ├── __init__.py
+│       └── shell.py              # Interactive shell mode
 ├── app/
 │   ├── __init__.py
 │   ├── main.py                    # FastAPI application entry
@@ -146,7 +162,12 @@ perp-dex-backend/
 │   │   ├── connector.py
 │   │   ├── client.py
 │   │   └── models.py
-│   └── vest/
+│   ├── vest/
+│   │   ├── __init__.py
+│   │   ├── connector.py
+│   │   ├── client.py
+│   │   └── models.py
+│   └── pacifica/
 │       ├── __init__.py
 │       ├── connector.py
 │       ├── client.py
@@ -316,6 +337,138 @@ class BaseConnector(ABC):
 - `/ws/v1/markets` - Real-time market data
 - `/ws/v1/account` - Account balance updates
 
+## CLI Design
+
+### Command Structure
+
+The CLI provides a powerful interface for traders and automation scripts with both interactive and batch modes.
+
+#### Main Commands
+- `perp-dex` - Main CLI entry point
+- `perp-dex interactive` - Launch interactive shell with auto-completion
+- `perp-dex --help` - Display comprehensive help
+
+#### Account Management Commands
+- `perp-dex account list` - List all configured accounts
+- `perp-dex account add --dex <dex_name>` - Add new account
+- `perp-dex account remove <account_id>` - Remove account
+- `perp-dex account info <account_id>` - Display account details
+- `perp-dex account balance <account_id>` - Get account balance
+- `perp-dex account switch <account_id>` - Set default account
+
+#### Trading Commands
+- `perp-dex trade buy <symbol> <amount> --price <price>` - Place buy order
+- `perp-dex trade sell <symbol> <amount> --price <price>` - Place sell order
+- `perp-dex trade cancel <order_id>` - Cancel order
+- `perp-dex trade modify <order_id> --price <new_price>` - Modify order
+- `perp-dex trade orders [--status <status>]` - List orders
+- `perp-dex trade history [--days <n>]` - Trading history
+
+#### Position Management Commands
+- `perp-dex position list [--dex <dex_name>]` - List all positions
+- `perp-dex position info <symbol>` - Detailed position info
+- `perp-dex position close <position_id> [--percent <n>]` - Close position
+- `perp-dex position pnl [--unrealized]` - Show P&L
+- `perp-dex position risk` - Display risk metrics
+
+#### Market Data Commands
+- `perp-dex market list` - List available markets
+- `perp-dex market info <symbol>` - Market details
+- `perp-dex market orderbook <symbol> [--depth <n>]` - Order book
+- `perp-dex market trades <symbol> [--limit <n>]` - Recent trades
+- `perp-dex market funding <symbol>` - Funding rates
+- `perp-dex market watch <symbols...>` - Real-time price monitoring
+
+#### Monitoring Commands
+- `perp-dex monitor orders` - Real-time order monitoring
+- `perp-dex monitor positions` - Real-time position monitoring
+- `perp-dex monitor account` - Real-time account monitoring
+- `perp-dex monitor market <symbol>` - Real-time market monitoring
+
+#### Configuration Commands
+- `perp-dex config show` - Display current configuration
+- `perp-dex config set <key> <value>` - Set configuration value
+- `perp-dex config api-key <dex> --add` - Add API key securely
+- `perp-dex config export [--file <path>]` - Export configuration
+- `perp-dex config import <file>` - Import configuration
+
+### Interactive Shell Features
+
+#### Auto-completion
+- Command completion
+- Symbol completion from available markets
+- Account ID completion
+- Order ID completion from recent orders
+
+#### Command History
+- Persistent command history
+- Search through history (Ctrl+R)
+- History export capability
+
+#### Real-time Updates
+- Live position updates in status bar
+- P&L tracking display
+- Alert notifications for order fills
+
+#### Shortcuts
+- Quick buy/sell aliases
+- Favorite symbol shortcuts
+- Custom command macros
+
+### CLI Configuration
+
+#### Configuration File (~/.perp-dex/config.yaml)
+```yaml
+default_account: "hyperliquid_main"
+default_dex: "hyperliquid"
+display:
+  colors: true
+  table_style: "rounded"
+  decimal_places: 2
+  show_timestamps: true
+shortcuts:
+  b: "trade buy"
+  s: "trade sell"
+  p: "position list"
+  o: "trade orders"
+alerts:
+  order_filled: true
+  position_liquidation: true
+  price_alerts: []
+```
+
+#### Secure Credential Storage
+- API keys stored in system keyring
+- Encryption for sensitive data
+- Support for hardware security modules
+- Session-based authentication caching
+
+### Automation Support
+
+#### Batch Mode
+- Execute commands from scripts
+- JSON output format for parsing
+- Exit codes for automation
+- Quiet mode for cron jobs
+
+#### Script Examples
+```bash
+# Place order and wait for fill
+perp-dex trade buy BTC-PERP 0.1 --price 45000 --wait-fill
+
+# Monitor position and close at target
+perp-dex position watch BTC-PERP --close-at-profit 10%
+
+# Export daily trading report
+perp-dex trade history --format csv > report.csv
+```
+
+#### Integration Features
+- Webhook support for events
+- Export to common formats (CSV, JSON, XLSX)
+- Integration with trading bots
+- API for programmatic access
+
 ## Implementation Phases
 
 ### Phase 1: Foundation (Week 1-2)
@@ -344,14 +497,17 @@ class BaseConnector(ABC):
 2. Implement Extended connector
 3. Implement EdgeX connector
 4. Implement Vest connector
-5. Ensure feature parity across connectors
+5. Implement Pacifica connector
+6. Ensure feature parity across connectors
 
-### Phase 5: API Layer (Week 6-7)
+### Phase 5: API & CLI Layer (Week 6-7)
 1. Implement all REST endpoints
 2. Add WebSocket endpoints
-3. Implement rate limiting
-4. Add request validation
-5. Generate API documentation
+3. Implement CLI command structure
+4. Add interactive shell mode
+5. Implement rate limiting
+6. Add request validation
+7. Generate API and CLI documentation
 
 ### Phase 6: Advanced Features (Week 7-8)
 1. Implement risk management service
@@ -444,9 +600,11 @@ class BaseConnector(ABC):
 - Mock external dependencies
 - Test all edge cases
 - Parameterized tests for connectors
+- CLI command parsing tests
+- Interactive shell behavior tests
 
 ### Integration Testing
-- Test DEX connector integrations
+- Test DEX connector integrations (all 6 DEXes)
 - Database integration tests
 - Redis integration tests
 - End-to-end API tests
@@ -499,9 +657,10 @@ class BaseConnector(ABC):
 - < 0.01% error rate
 
 ### Business Metrics
-- Number of supported DEXes
+- Number of supported DEXes (target: 6 initially)
 - Total trading volume processed
 - Number of active accounts
+- CLI adoption rate
 - User satisfaction score
 
 ## Maintenance & Support
@@ -521,7 +680,7 @@ class BaseConnector(ABC):
 ## Future Enhancements
 
 ### Short-term (3-6 months)
-- Additional DEX integrations
+- Additional DEX integrations beyond initial 6
 - Advanced order types
 - Trading algorithms/bots
 - Mobile API support
